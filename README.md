@@ -45,23 +45,22 @@ The architecture is illustrated below using Mermaid syntax (renderable on GitHub
 
 ```mermaid
 graph TD
-    A[User Email Client] -->|Forward Email| B[AWS SES Inbound]
-    B -->|Store Raw Email| C[AWS S3 Bucket]
-    B -->|Trigger (Receipt Rule)| D[AWS Lambda Function]
-    D -->|Get Email Content| C
-    D -->|Check Whitelist| E[Environment Vars]
-    D -->|Invoke LLM| F[Amazon Bedrock - Claude 3.5]
-    F -->|Return Summary| D
-    D -->|Send Summary Email| G[AWS SES Outbound]
-    G -->|Email Response| A
-    H[AWS Route 53] -->|DNS Records (MX, TXT, CNAME)| B
+    A[User Email Client] -->|Forwards Email| B[AWS SES Inbound]
+    B -->|Stores Raw Email| C[AWS S3 Bucket]
+    B -->|Triggers via Receipt Rule| D[AWS Lambda Function]
+    D -->|Retrieves Email Content| C
+    D -->|Checks Whitelist| E[Environment Variables]
+    D -->|Invokes LLM| F[Amazon Bedrock - Claude 3.5]
+    F -->|Returns Summary| D
+    D -->|Sends Summary Email| G[AWS SES Outbound]
+    G -->|Delivers Response| A
+    H[AWS Route 53] -->|"Configures DNS Records (MX, TXT, CNAME)"| B
 
-    subgraph Security & Config
-        E[Environment Vars]
-        I[IAM Roles/Policies]
+    subgraph "Security & Configuration"
+        E[Environment Variables]
+        I[IAM Roles & Policies]
     end
-
-    I --> D
+    I -->|Grants Permissions| D
 ```
 
 - **User Interaction**: Starts and ends with the user's email client.
@@ -253,4 +252,4 @@ Pull requests welcome! For major changes, open an issue first.
 
 ---
 
-Built with ❤️ using AWS and Terraform. For questions, contact [your-email@example.com].
+Built with ❤️ using AWS and Terraform.
