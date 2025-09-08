@@ -164,7 +164,6 @@ resource "aws_api_gateway_method_response" "get_feed_response" {
   }
 }
 
-# Integration Response (Transform DynamoDB output to ICS)
 resource "aws_api_gateway_integration_response" "get_feed_integration_response" {
   rest_api_id = aws_api_gateway_rest_api.ics_api.id
   resource_id = aws_api_gateway_resource.feed.id
@@ -176,30 +175,41 @@ resource "aws_api_gateway_integration_response" "get_feed_integration_response" 
     "method.response.header.Content-Disposition" = "'attachment; filename=\"calendar.ics\"'"
   }
 
-  # Mapping template with proper line endings, fixed RRULE, and all-day event handling
+  # IMPORTANT: Use real newlines. No \r\n literals.
   response_templates = {
     "text/calendar" = <<EOF
-BEGIN:VCALENDAR\r\n
-VERSION:2.0\r\n
-PRODID:-//YourApp//ICS Feed//EN\r\n
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//YourApp//ICS Feed//EN
+CALSCALE:GREGORIAN
+X-WR-CALNAME:School Calendar
 #foreach($item in $input.path('$.Items'))
-BEGIN:VEVENT\r\n
-UID:$item.eventId.S\r\n
-#if($item.dtstart.S.endsWith("T000000Z") && $item.dtend.S.endsWith("T235959Z"))
-DTSTART;VALUE=DATE:$item.dtstart.S.substring(0,8)\r\n
-DTEND;VALUE=DATE:$item.dtend.S.substring(0,8)\r\n
+BEGIN:VEVENT
+UID:$item.eventId.S
+#if($item.dtstamp.S && $item.dtstamp.S != "")
+DTSTAMP:$item.dtstamp.S
+#end
+#set($ds = $item.dtstart.S)
+#set($de = $item.dtend.S)
+#if($ds.length() == 8 && $de.length() == 8)
+DTSTART;VALUE=DATE:$ds
+DTEND;VALUE=DATE:$de
 #else
-DTSTART:$item.dtstart.S\r\n
-DTEND:$item.dtend.S\r\n
+DTSTART:$ds
+DTEND:$de
 #end
-SUMMARY:$util.escapeJavaScript($item.summary.S).replaceAll("\n","\\n").replaceAll(",","\\,")\r\n
-DESCRIPTION:$util.escapeJavaScript($item.description.S).replaceAll("\n","\\n").replaceAll(",","\\,")\r\n
-#if($item.location.S && $item.location.S != "")LOCATION:$util.escapeJavaScript($item.location.S).replaceAll("\n","\\n").replaceAll(",","\\,")\r\n#end
-#if($item.rrule.S && $item.rrule.S != "")RRULE:$item.rrule.S\r\n#end
-STATUS:$item.status.S\r\n
-END:VEVENT\r\n
+SUMMARY:$util.escapeJavaScript($item.summary.S).replaceAll(",", "\\\\,").replaceAll(";", "\\\\;")
+DESCRIPTION:$util.escapeJavaScript($item.description.S).replaceAll(",", "\\\\,").replaceAll(";", "\\\\;")
+#if($item.containsKey("location") && $item.location.S != "")
+LOCATION:$util.escapeJavaScript($item.location.S).replaceAll(",", "\\\\,").replaceAll(";", "\\\\;")
 #end
-END:VCALENDAR\r\n
+#if($item.containsKey("rrule") && $item.rrule.S != "")
+RRULE:$item.rrule.S
+#end
+STATUS:$item.status.S
+END:VEVENT
+#end
+END:VCALENDAR
 EOF
   }
 
