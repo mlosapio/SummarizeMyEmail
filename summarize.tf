@@ -9,9 +9,10 @@
 # - S3 stores raw emails for full content access.
 # - Parse email body for custom prompt (text before forwarded message) to override default LLM prompt.
 # - Whitelist sender email addresses via Lambda env var; discard if not whitelisted.
+# - Uses static calendarToken (b7f4a9c2e1d8) for DynamoDB operations.
 
 provider "aws" {
-  region = "us-east-1"  # Change if needed; must match SES receiving region.
+  region = "us-east-1"
 }
 
 # Variables
@@ -74,7 +75,7 @@ resource "aws_route53_record" "mx" {
   name    = var.domain_name
   type    = "MX"
   ttl     = 600
-  records = ["10 inbound-smtp.us-east-1.amazonaws.com"]  # Updated to correct MX for SES receiving
+  records = ["10 inbound-smtp.us-east-1.amazonaws.com"]
 }
 
 # Optional: DMARC Record
@@ -83,7 +84,7 @@ resource "aws_route53_record" "dmarc" {
   name    = "_dmarc.${var.domain_name}"
   type    = "TXT"
   ttl     = 600
-  records = ["v=DMARC1; p=none;"]  # Customize policy as needed
+  records = ["v=DMARC1; p=none;"]
 }
 
 # S3 Bucket for storing inbound emails
@@ -143,7 +144,7 @@ resource "aws_iam_role" "lambda_role" {
   })
 }
 
-# IAM Policy for Lambda: Logs, S3 Get, Bedrock Invoke, SES Send
+# IAM Policy for Lambda: Logs, S3 Get, Bedrock Invoke, SES Send, DynamoDB
 data "aws_iam_policy_document" "lambda_policy" {
   statement {
     actions   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
@@ -160,13 +161,19 @@ data "aws_iam_policy_document" "lambda_policy" {
   statement {
     actions   = ["bedrock:InvokeModel"]
     effect    = "Allow"
-    resources = ["*"]  # Or specify model ARN, e.g., arn:aws:bedrock:us-east-1::model/anthropic.claude-3-5-sonnet-20240620-v1:0
+    resources = ["*"]
   }
 
   statement {
     actions   = ["ses:SendEmail", "ses:SendRawEmail"]
     effect    = "Allow"
     resources = ["*"]
+  }
+
+  statement {
+    actions   = ["dynamodb:Query", "dynamodb:PutItem", "dynamodb:UpdateItem"]
+    effect    = "Allow"
+    resources = ["arn:aws:dynamodb:us-east-1:${data.aws_caller_identity.current.account_id}:table/Calendars"]
   }
 }
 
@@ -176,7 +183,7 @@ resource "aws_iam_role_policy" "lambda_policy_attach" {
   policy = data.aws_iam_policy_document.lambda_policy.json
 }
 
-# Zip the Lambda code (inline Python code with fixes for KeyError: 'actions' and NameError: 'var')
+# Zip the Lambda code with improved prompt for all-day events
 data "archive_file" "lambda_zip" {
   type        = "zip"
   output_path = "${path.module}/lambda.zip"
@@ -189,6 +196,7 @@ import email
 from email.parser import BytesParser
 import os
 import re
+import uuid
 
 def lambda_handler(event, context):
     # Log event for debugging
@@ -233,6 +241,17 @@ def lambda_handler(event, context):
             custom_prompt = prompt_text
         email_content = body[forwarded_marker.start():].strip()
 
+    print(f"Custom prompt: {custom_prompt}")
+
+    # Check if instructions to add calendar events
+    add_to_calendar = 'add calendar' in custom_prompt.lower()
+    print(f"Add to calendar detected: {add_to_calendar}")
+
+    # Build Claude prompt with stricter requirements
+    claude_content = f"{custom_prompt}\n{email_content}"
+    if add_to_calendar:
+        claude_content = f"{custom_prompt}\nAdditionally, extract any mentioned events as a JSON array of objects with keys: summary (string), dtstart (in YYYYMMDDTHHMMSSZ UTC format for timed events or YYYYMMDD for all-day events), dtend (in YYYYMMDDTHHMMSSZ UTC format for timed events or YYYYMMDD for all-day events, after dtstart), description (string), location (string, empty if none), rrule (valid RFC 5545 recurrence rule or omit if not recurring), status (default CONFIRMED), eventId (unique UUID). Ensure: 1) Valid JSON with proper brackets; 2) Always include summary, dtstart, dtend, eventId; 3) Use YYYYMMDD for all-day events (e.g., 20250911) and YYYYMMDDTHHMMSSZ for timed events; 4) Avoid edge-case timings (e.g., 23:59:59 to 00:00:00); 5) Escape commas in summary, description, location with \\,. Output the summary first, then on a new line: EVENTS_JSON: <json array>; 6) Assume events start/stop times are all local NYC time so make the appropriate time conversions. Events descriptions should include whether they're for Mia or Michael if the email message being parsed is originally from icsclinton.org.\nEmail content: {email_content}"
+
     # Summarize with Bedrock (Claude 3.5 Sonnet)
     bedrock = boto3.client('bedrock-runtime')
     prompt = {
@@ -241,7 +260,7 @@ def lambda_handler(event, context):
         "messages": [
             {
                 "role": "user",
-                "content": f"{custom_prompt} {email_content}"
+                "content": claude_content
             }
         ]
     }
@@ -252,18 +271,124 @@ def lambda_handler(event, context):
         accept='application/json'
     )
     response_body = json.loads(response['body'].read())
-    summary = response_body['content'][0]['text']
+    response_text = response_body['content'][0]['text']
+    print(f"Claude full response: {response_text}")
+
+    # Parse response for summary and events
+    events = []
+    summary = response_text
+    if add_to_calendar and 'EVENTS_JSON:' in response_text:
+        parts = response_text.split('EVENTS_JSON:', 1)
+        summary = parts[0].strip()
+        events_json = parts[1].strip()
+        print(f"Parsed summary: {summary}")
+        print(f"Raw events_json: {events_json}")
+        try:
+            events = json.loads(events_json)
+            print(f"Parsed events: {json.dumps(events, indent=2)}")
+        except Exception as e:
+            print(f"Failed to parse events JSON: {str(e)}")
+            events = []
 
     # Send summary via SES back to sender
     ses = boto3.client('ses')
     ses.send_email(
-        Source="noreply@${var.domain_name}",  # Verified sender
+        Source="noreply@${var.domain_name}",
         Destination={'ToAddresses': [sender]},
         Message={
             'Subject': {'Data': 'Email Summary'},
             'Body': {'Text': {'Data': summary}}
         }
     )
+
+    # If events extracted, update/insert into DynamoDB
+    if events:
+        dynamodb = boto3.client('dynamodb')
+        calendar_token = os.environ.get('CALENDAR_TOKEN', 'b7f4a9c2e1d8')
+        print(f"Using calendar_token: {calendar_token}")
+        try:
+            # Query existing events
+            db_response = dynamodb.query(
+                TableName='Calendars',
+                KeyConditionExpression='calendarToken = :token',
+                ExpressionAttributeValues={':token': {'S': calendar_token}}
+            )
+            existing = db_response['Items']
+            print(f"Existing events count: {len(existing)}")
+            print(f"Existing events: {json.dumps(existing, default=str)}")
+        except Exception as e:
+            print(f"Failed to query DynamoDB: {str(e)}")
+            existing = []
+
+        for event in events:
+            print(f"Processing event: {json.dumps(event, indent=2)}")
+            if 'summary' not in event or 'dtstart' not in event or 'dtend' not in event or 'eventId' not in event:
+                print("Skipping event: Missing required fields (summary, dtstart, dtend, eventId)")
+                continue
+
+            dtstart = event['dtstart']
+            summary_ev = event['summary']
+            description = event.get('description', '')
+            location = event.get('location', '')
+            rrule = event.get('rrule', None)
+            status = event.get('status', 'CONFIRMED')
+            event_id = event['eventId']
+
+            # Check for matching event (exact dtstart and case-insensitive summary)
+            matched_item = next((ex for ex in existing if ex.get('dtstart', {}).get('S') == dtstart and ex.get('summary', {}).get('S', '').lower() == summary_ev.lower()), None)
+            if matched_item:
+                print(f"Matched existing event for update: dtstart={dtstart}, summary={summary_ev}")
+                key = {
+                    'calendarToken': {'S': calendar_token},
+                    'eventStartTime': {'S': dtstart}
+                }
+                update_expr = 'SET summary = :sum, dtend = :end, description = :desc, location = :loc, status = :stat, eventId = :eid'
+                attr_vals = {
+                    ':sum': {'S': summary_ev},
+                    ':end': {'S': event['dtend']},
+                    ':desc': {'S': description},
+                    ':loc': {'S': location},
+                    ':stat': {'S': status},
+                    ':eid': {'S': event_id}
+                }
+                if rrule:
+                    update_expr += ', rrule = :rr'
+                    attr_vals[':rr'] = {'S': rrule}
+                try:
+                    dynamodb.update_item(
+                        TableName='Calendars',
+                        Key=key,
+                        UpdateExpression=update_expr,
+                        ExpressionAttributeValues=attr_vals
+                    )
+                    print("UpdateItem succeeded")
+                except Exception as e:
+                    print(f"Failed to update item: {str(e)}")
+            else:
+                print(f"No match found; inserting new event: dtstart={dtstart}, summary={summary_ev}")
+                item = {
+                    'calendarToken': {'S': calendar_token},
+                    'eventStartTime': {'S': dtstart},
+                    'eventId': {'S': event_id},
+                    'summary': {'S': summary_ev},
+                    'dtstart': {'S': dtstart},
+                    'dtend': {'S': event['dtend']},
+                    'description': {'S': description},
+                    'location': {'S': location},
+                    'status': {'S': status}
+                }
+                if rrule:
+                    item['rrule'] = {'S': rrule}
+                try:
+                    dynamodb.put_item(
+                        TableName='Calendars',
+                        Item=item
+                    )
+                    print("PutItem succeeded")
+                except Exception as e:
+                    print(f"Failed to put item: {str(e)}")
+    else:
+        print("No events to process for DynamoDB")
 
     # Return disposition to continue or stop
     return {"disposition": "CONTINUE"}
@@ -272,7 +397,7 @@ EOF
   }
 }
 
-# Lambda Function with env var for whitelist
+# Lambda Function with env vars for whitelist and calendar token
 resource "aws_lambda_function" "email_processor" {
   filename         = data.archive_file.lambda_zip.output_path
   function_name    = "email-summarizer"
@@ -281,11 +406,12 @@ resource "aws_lambda_function" "email_processor" {
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
   runtime          = "python3.12"
   timeout          = 30
-  memory_size      = 512  # Added to ensure sufficient memory for email processing
+  memory_size      = 512
 
   environment {
     variables = {
       WHITELISTED_EMAILS = join(",", var.whitelisted_emails)
+      CALENDAR_TOKEN     = "b7f4a9c2e1d8"
     }
   }
 }
