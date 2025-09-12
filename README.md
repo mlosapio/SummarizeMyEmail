@@ -1,255 +1,106 @@
-# Email Summarizer: Serverless AWS Service
-
-[![AWS](https://img.shields.io/badge/AWS-Serverless-orange?logo=amazon-aws)](https://aws.amazon.com/serverless/)
-[![Terraform](https://img.shields.io/badge/Terraform-1.5+-blueviolet?logo=terraform)](https://www.terraform.io/)
+# Summarize My Email
 
 ## Overview
 
-This project deploys a serverless email summarization service on AWS. Users forward emails to a custom address (e.g., summarize@yourdomain.com), and an AI-powered LLM (Amazon Bedrock with Anthropic Claude 3.5 Sonnet) generates a summary, emailed back to the sender. Key features:
+This Terraform project deploys a serverless email summarization and calendar integration service on AWS. Emails sent to `summarize@yourdomain.com` are summarized using Amazon Bedrock (Claude 3.5 Sonnet). If the email includes instructions like "add calendar," events are extracted and added to a DynamoDB table. Calendar events are served as an ICS feed via API Gateway using a static, hard-to-guess token for access.
 
-- **Custom Prompts**: Add instructions (e.g., "Extract action items:") before the forwarded email content to customize the LLM's response.
-- **Whitelisting**: Only emails from specified sender addresses are processed to prevent abuse.
-- **Privacy-Focused**: Emails are processed ephemerally; raw emails are stored temporarily in S3 but can be configured for auto-deletion.
-- **Serverless**: Uses AWS SES (email handling), Lambda (processing), Bedrock (LLM), S3 (storage), and Route 53 (DNS).
+The project consists of two main Terraform files:
+- `calendar.tf`: Configures DynamoDB, API Gateway, and IAM for serving the ICS feed.
+- `summarize.tf`: Configures SES, Route53, S3, Lambda, and Bedrock for email processing and summarization.
 
-Ideal for personal productivity, newsletter digestion, or automated email workflows. Estimated cost: ~$0.01 per processed message (10KB email, 1,500 input tokens, 300 output tokens).
+## Features
 
-## How It Works
+- **Email Summarization**: AI-powered bullet-point summaries of email content.
+- **Calendar Event Extraction**: Automatically detects and adds events to DynamoDB if instructed.
+- **ICS Feed**: Publicly accessible ICS endpoint for calendar subscriptions (e.g., Google Calendar, Apple Calendar).
+- **Email Whitelisting**: Restricts processing to specified sender emails.
+- **Serverless Architecture**: Uses AWS Lambda, SES, S3, DynamoDB, API Gateway, and Bedrock.
+- **Low Cost**: Eligible for AWS Free Tier; estimated ~$0.0027/month with Free Tier, ~$0.119/month without for low traffic (based on ICS feed component).
 
-1. **Email Forwarding**:
-   - Forward an email to summarize@yourdomain.com.
-   - Optionally, include a custom prompt (e.g., "Summarize in 3 bullets:") before the forwarded message marker (e.g., --- Forwarded message --- or From:).
+## Architecture
 
-2. **Processing Flow**:
-   - AWS SES receives the email and triggers a receipt rule.
-   - The email is stored in an S3 bucket for full content access.
-   - A Lambda function is invoked with email metadata.
-   - Lambda:
-     - Retrieves the email from S3.
-     - Checks the sender against a whitelist (environment variable).
-     - Parses the body for a custom prompt (defaults to "Summarize the following email content in bullet points:").
-     - Invokes Bedrock to generate the summary.
-     - Sends the summary back via SES from noreply@yourdomain.com.
-   - Non-whitelisted emails are discarded silently.
+- **SES & Route53**: Handles email receiving with MX records, verification (TXT, DKIM, SPF, DMARC), and triggers Lambda on receipt.
+- **S3**: Stores raw incoming emails.
+- **Lambda**: Parses emails, uses Bedrock for summarization and event extraction, sends summary replies via SES, and upserts events in DynamoDB using a static calendar token (`default`).
+- **Bedrock**: Invokes Claude 3.5 Sonnet for generating summaries and structured event data.
+- **DynamoDB**: Stores calendar events with `calendarToken` as hash key and `eventStartTime` as range key.
+- **API Gateway**: Queries DynamoDB and generates ICS format responses via a GET endpoint (e.g., `/ics-default.ics` or configured via `ics_filename` variable).
 
-3. **Key Technologies**:
-   - **AWS SES**: Handles inbound/outbound emails and triggers processing.
-   - **AWS Lambda**: Python 3.12 function for logic (parsing, whitelisting, LLM call).
-   - **Amazon Bedrock**: Uses Claude 3.5 Sonnet for summarization.
-   - **AWS S3**: Temporary storage for raw emails.
-   - **AWS Route 53**: Manages DNS records (MX, TXT, CNAME) for email routing and verification.
+Security for the ICS feed relies on obscurity of the static URI path (no authentication). Use cautiously.
 
-## Architecture Diagram
+## Prerequisites
 
-The architecture is illustrated below using Mermaid syntax (renderable on GitHub or Mermaid Live).
+- AWS account with permissions for SES, Lambda, S3, DynamoDB, API Gateway, Route53, Bedrock, and IAM.
+- Domain name (e.g., `yourdomain.com`) for email handling (must be verifiable in SES).
+- Terraform installed.
+- AWS CLI configured with credentials.
 
-```mermaid
-graph TD
-    A[User Email Client] -->|Forwards Email| B[AWS SES Inbound]
-    B -->|Stores Raw Email| C[AWS S3 Bucket]
-    B -->|Triggers via Receipt Rule| D[AWS Lambda Function]
-    D -->|Retrieves Email Content| C
-    D -->|Checks Whitelist| E[Environment Variables]
-    D -->|Invokes LLM| F[Amazon Bedrock - Claude 3.5]
-    F -->|Returns Summary| D
-    D -->|Sends Summary Email| G[AWS SES Outbound]
-    G -->|Delivers Response| A
-    H[AWS Route 53] -->|"Configures DNS Records (MX, TXT, CNAME)"| B
+## Installation
 
-    subgraph "Security & Configuration"
-        E[Environment Variables]
-        I[IAM Roles & Policies]
-    end
-    I -->|Grants Permissions| D
-```
-
-- **User Interaction**: Starts and ends with the user's email client.
-- **Data Flow**: Email → SES → S3/Lambda → Bedrock → SES → User.
-- **Control Flow**: Whitelisting and prompts handled in Lambda.
-
-## Deployment
-
-### Prerequisites
-- **AWS Account**: Permissions for SES, Lambda, Bedrock, S3, Route 53, and IAM (see IAM policy below).
-- **Domain Ownership**: A registered domain (e.g., via Route 53 or another registrar). Update name servers to point to the Route 53 hosted zone created by Terraform.
-- **Terraform**: Version 1.5+ installed.
-- **AWS CLI**: Configured with credentials.
-- **Bedrock Access**: Enable Anthropic Claude models in the AWS Bedrock console (us-east-1).
-
-### Steps
-1. **Clone the Repository**:
-   ```bash
-   git clone <repo-url>
-   cd <repo-directory>
+1. Clone the repository:
+   ```
+   git clone git@github.com:mlosapio/SummarizeMyEmail.git
+   cd SummarizeMyEmail
    ```
 
-2. **Configure terraform.tfvars**:
-   - Create a terraform.tfvars file in the root directory.
-   - Example (replace with your values):
-     ```hcl
-     domain_name = "yourdomain.com"
+2. Edit `summarize.tfvars` to set:
+   - `domain_name`: Your domain (e.g., "yourdomain.com").
+   - `whitelisted_emails`: Array of allowed sender emails (e.g., ["user@example.com"]).
 
-     whitelisted_emails = ["your.email@example.com", "another.email@domain.com"]
-     ```
-   - domain_name: Your domain for email handling.
-   - whitelisted_emails: List of allowed sender emails (case-insensitive).
-
-3. **Initialize Terraform**:
-   ```bash
+3. Initialize Terraform:
+   ```
    terraform init
    ```
 
-4. **Review Plan**:
-   ```bash
-   terraform plan
+4. Apply the configuration:
+   ```
+   terraform apply -var-file="summarize.tfvars"
    ```
 
-5. **Apply Changes**:
-   ```bash
-   terraform apply
-   ```
-   - Creates: Route 53 hosted zone, SES identity, DNS records, S3 bucket, IAM role, Lambda function, SES receipt rules.
-   - Output includes hosted zone name servers—update your domain registrar with these.
+5. Verify SES domain identity and DNS records in Route53 (or manually if not using Route53).
+6. Note the outputted API endpoint for the ICS feed.
 
-6. **Verify SES**:
-   - In the AWS SES console, confirm domain verification (may take up to 72 hours for DNS propagation).
-   - Test sending from noreply@yourdomain.com (SES may require manual verification for new domains).
+## Usage
 
-7. **Test the Service**:
-   - From a whitelisted email, forward a message to summarize@yourdomain.com. Optionally include a custom prompt (e.g., "Extract action items:").
-   - Check your inbox for the summary response.
-   - Monitor Lambda logs in CloudWatch (/aws/lambda/email-summarizer) for debugging.
+### Summarizing Emails
+- Send or forward an email to `summarize@yourdomain.com`.
+- Optional: Include a custom prompt before the forwarded content (e.g., "Summarize in detail:").
+- If whitelisted, receive a summarized reply from `noreply@yourdomain.com`.
 
-8. **Cleanup**:
-   ```bash
-   terraform destroy
-   ```
-   - Note: This won't delete the domain registration if managed outside Terraform.
+### Adding Calendar Events
+- Include "add calendar" in the email body or subject.
+- The AI extracts events (e.g., dates, times, summaries) and adds them to DynamoDB.
+- Events support all-day or timed formats, locations, descriptions, and RRULE recurrences.
 
-## Configuration
+### Accessing the ICS Feed
+- Subscribe to the endpoint: `https://<api-id>.execute-api.us-east-1.amazonaws.com/prod/<ics_filename>` (e.g., `/ics-default.ics`).
+- Use in calendar apps by adding the URL as a subscribed calendar.
 
-### Terraform Variables
-- domain_name (string, required): Domain for SES and Route 53 (e.g., "example.com").
-- whitelisted_emails (list(string), optional, default: []): Emails allowed to trigger summarization.
+## Customization
 
-### Lambda Environment Variables
-- WHITELISTED_EMAILS: Comma-separated list from var.whitelisted_emails (set by Terraform).
+- Update the calendar token in `summarize.tf` (Lambda env var) and `calendar.tf` (request template and output).
+- Modify the Bedrock prompt in the Lambda code for custom summarization logic.
+- Adjust `ics_filename` variable in `calendar.tf` for the ICS endpoint path.
 
-### Customizing
-- **LLM Prompt**: Edit the default in lambda_function.py (e.g., change max_tokens or model ID).
-- **S3 Lifecycle**: Add a lifecycle policy to delete old emails (e.g., after 7 days):
-  ```hcl
-  resource "aws_s3_bucket_lifecycle_configuration" "email_bucket_lifecycle" {
-    bucket = aws_s3_bucket.email_bucket.id
-    rule {
-      id     = "expire-emails"
-      status = "Enabled"
-      expiration {
-        days = 7
-      }
-    }
-  }
-  ```
-- **Error Handling**: Enhance Lambda for retries or notifications (e.g., via SNS).
+## Security Notes
 
-## Important Points to Note
+- **ICS Feed**: Relies on security by obscurity (static token in URL). Not suitable for sensitive data; consider adding authentication for production.
+- **Email Whitelisting**: Prevents unauthorized usage; configure via `whitelisted_emails`.
+- **Permissions**: Lambda has targeted IAM policies for S3, Bedrock, SES, and DynamoDB.
 
-- **Costs**:
-  - **SES**: $0.10 per 1,000 emails received/sent + data transfer (~$0.001 for 10KB email).
-  - **Lambda**: $0.20 per 1M requests + $0.00001667 per GB-second (~$0.000083 for 512MB, 10s).
-  - **Bedrock**: $0.003/1K input tokens + $0.015/1K output tokens (~$0.009 for 1,500 in + 300 out).
-  - **S3/Route 53**: ~$0.50/month for hosted zone + storage.
-  - Total per message: ~$0.01. Free tier may apply for low usage.
-  - Monitor with AWS Cost Explorer.
+## Costs
 
-- **Security**:
-  - Whitelisting prevents spam; update via Terraform re-apply.
-  - IAM: Least privilege—Lambda role only allows necessary actions.
-  - Data: Emails in S3 are private; enable encryption if needed (e.g., add aws_s3_bucket_server_side_encryption_configuration).
-  - SES Sandbox: New accounts start in sandbox mode—request production access for unlimited sending via AWS Support.
-
-- **Limitations**:
-  - Email Size: SES limits ~10MB; large attachments may fail.
-  - DNS Propagation: MX/TXT/CNAME records may take 48-72 hours.
-  - Bedrock Region: Must be us-east-1 (or adjust provider region).
-  - No Attachments: Current Lambda parses text/plain only; extend for HTML/multipart if needed.
-
-- **Scalability**: Serverless—handles high volume automatically.
-- **Maintenance**: Update Bedrock model ID if deprecated. Monitor Lambda for timeouts (current: 30s, 512MB).
-
-## Example terraform.tfvars
-
-```hcl
-domain_name = "summarizemyemail.com"
-
-whitelisted_emails = ["john.doe@gmail.com", "jane.smith@outlook.com", "alice@examplecorp.com"]
-```
+- **ICS Feed Component**: ~$0.0027/month (Free Tier), ~$0.119/month without for low traffic.
+- **Email Processing**: Costs for SES (~$0.10/1,000 emails), Lambda invocations (~$0.20/1M requests), Bedrock (~$0.003/1,000 input tokens), S3 storage (minimal), DynamoDB (pay-per-request).
+- Monitor via AWS Cost Explorer; mostly Free Tier eligible for low usage.
 
 ## Troubleshooting
 
-- **Email Not Received**:
-  - Check MX records: dig MX yourdomain.com.
-  - Ensure SES domain is verified in the AWS SES console.
-  - Verify DNS propagation for MX, TXT, and CNAME records.
-
-- **Lambda Not Triggered**:
-  - Confirm SES receipt rule is active (email-summarizer-rules) in SES console.
-  - Check CloudWatch Logs (/aws/lambda/email-summarizer) for errors.
-  - Verify aws_lambda_permission.ses_invoke is applied.
-
-- **Whitelist Issues**:
-  - Whitelisting is case-insensitive; ensure exact email match in whitelisted_emails.
-  - Test with a whitelisted email forwarding to summarize@yourdomain.com.
-
-- **Bedrock Errors**:
-  - Confirm access to Claude 3.5 Sonnet in Bedrock console (us-east-1).
-  - Check IAM role for bedrock:InvokeModel permission.
-
-- **Terraform Errors**:
-  - Ensure AWS credentials have required permissions (see IAM policy below).
-  - Enable debug logging: export TF_LOG=DEBUG and rerun terraform apply.
-
-## IAM Policy for Deployment
-
-Ensure your AWS credentials have permissions for the following actions:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "route53:CreateHostedZone",
-        "route53:ChangeResourceRecordSets",
-        "ses:*",
-        "s3:CreateBucket",
-        "s3:PutBucketPolicy",
-        "s3:GetObject",
-        "s3:PutObject",
-        "lambda:CreateFunction",
-        "lambda:InvokeFunction",
-        "bedrock:InvokeModel",
-        "iam:CreateRole",
-        "iam:PutRolePolicy",
-        "logs:CreateLogGroup",
-        "logs:CreateLogStream",
-        "logs:PutLogEvents"
-      ],
-      "Resource": "*"
-    }
-  ]
-}
-```
-
-## License
-
-MIT License. See [LICENSE](LICENSE) for details.
+- Check Lambda logs in CloudWatch for errors.
+- Ensure SES domain is verified (status in AWS Console).
+- Validate DNS records propagate correctly.
+- If events aren't added, review the Bedrock response parsing in Lambda code.
 
 ## Contributing
 
-Pull requests welcome! For major changes, open an issue first.
-
----
-
-Built with ❤️ using AWS and Terraform.
+Fork the repository, make changes, and submit a pull request.
