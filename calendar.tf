@@ -14,6 +14,12 @@ variable "region" {
   default     = "us-east-1"
 }
 
+# Variable definition
+variable "ics_filename" {
+  type    = string
+  default = "test"
+}
+
 # DynamoDB Table for Calendar Events
 resource "aws_dynamodb_table" "calendars" {
   name         = "Calendars"
@@ -101,17 +107,17 @@ resource "aws_api_gateway_rest_api_policy" "ics_api_policy" {
         Effect    = "Allow"
         Principal = "*"
         Action    = "execute-api:Invoke"
-        Resource  = "arn:aws:execute-api:${var.region}:${data.aws_caller_identity.current.account_id}:${aws_api_gateway_rest_api.ics_api.id}/*/*/ics-b7f4a9c2e1d8.ics"
+        Resource  = "arn:aws:execute-api:${var.region}:${data.aws_caller_identity.current.account_id}:${aws_api_gateway_rest_api.ics_api.id}/*/*/${var.ics_filename}"
       }
     ]
   })
 }
 
-# Resource for /ics-b7f4a9c2e1d8.ics
+# Resource for calendar
 resource "aws_api_gateway_resource" "feed" {
   rest_api_id = aws_api_gateway_rest_api.ics_api.id
   parent_id   = aws_api_gateway_rest_api.ics_api.root_resource_id
-  path_part   = "ics-b7f4a9c2e1d8.ics"
+  path_part   = var.ics_filename
 }
 
 # GET Method
